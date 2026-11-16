@@ -1,0 +1,41 @@
+
+import os
+
+import anthropic
+import chromadb
+from sentence_transformers import SentenceTransformer
+
+MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
+TOP_K = 4
+
+_embedder = SentenceTransformer("all-MiniLM-L6-v2")
+_col = chromadb.PersistentClient(path="chroma_db").get_collection("docs")
+_client = anthropic.Anthropic() 
+
+SYSTEM = (
+    "You are a helpful assistant that answers ONLY from the provided context. "
+    "If the answer is not in the context, say \"I don't know based on the documents.\" "
+    "Cite sources inline like [source, p.N]. Be concise."
+)
+
+
+def retrieve(query, k=TOP_K):
+    emb = _embedder.encode([query], normalize_embeddings=True).tolist()
+    res = _col.query(query_embeddings=emb, n_results=k)
+    return [
+        {"text": d, "source": m["source"], "page": m["page"], "distance": dist}
+        for d, m, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0])
+    ]
+
+
+def answer(query, history=None):
+    """history: list of {"role": "user"|"assistant", "content": str}"""
+    hits = retrieve(query)
+    context = "\n\n".join(f"[{h['source']}, p.{h['page']}]\n{h['text']}" for h in hits)
+    messages = (history or []) + [
+        {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"}
+    ]
+    resp = _client.messages.create(
+        model=MODEL, max_tokens=800, system=SYSTEM, messages=messages
+    )
+    return resp.content[0].text, hits

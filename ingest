@@ -1,0 +1,62 @@
+from pathlib import Path
+
+import chromadb
+from pypdf import PdfReader
+from sentence_transformers import SentenceTransformer
+
+DATA_DIR = Path("data")
+DB_DIR = "chroma_db"
+COLLECTION = "docs"
+CHUNK_WORDS = 300   # 
+OVERLAP = 50
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+
+def chunk_words(text, size=CHUNK_WORDS, overlap=OVERLAP):
+	words = text.split()
+	step = size - overlap
+	for i in range(0, len(words), step):
+		piece = " ".join(words[i:i + size])
+		if piece.strip():
+			yield piece
+
+
+def load_pages(path):
+	"""Yield (page_number, text) for each page of a file."""
+	if path.suffix.lower() == ".pdf":
+		for n, page in enumerate(PdfReader(str(path)).pages, start=1):
+			yield n, page.extract_text() or ""
+	else:
+		yield 1, path.read_text(encoding="utf-8", errors="ignore")
+
+
+def main():
+	client = chromadb.PersistentClient(path=DB_DIR)
+	try:
+		client.delete_collection(COLLECTION)  
+	except Exception:
+		pass
+	col = client.create_collection(COLLECTION, metadata={"hnsw:space": "cosine"})
+
+	ids, docs, metas = [], [], []
+	for path in sorted(DATA_DIR.glob("*")):
+		if path.suffix.lower() not in {".pdf", ".txt", ".md"}:
+			continue
+		for page_no, text in load_pages(path):
+			for j, chunk in enumerate(chunk_words(text)):
+				ids.append(f"{path.name}-p{page_no}-c{j}")
+				docs.append(chunk)
+				metas.append({"source": path.name, "page": page_no})
+
+	if not docs:
+		print("No documents found in ./data")
+		return
+
+	embeddings = model.encode(docs, show_progress_bar=True, normalize_embeddings=True).tolist()
+	col.add(ids=ids, documents=docs, embeddings=embeddings, metadatas=metas)
+	print(f"Indexed {len(docs)} chunks from {len({m['source'] for m in metas})} file(s).")
+
+
+if __name__ == "__main__":
+	main()

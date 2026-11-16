@@ -1,0 +1,8 @@
+
+import json
+
+from rag import retrieve
+
+items = json.load(open("eval_set.json"))
+hits = sum(any(h["source"] == it["source"] for h in retrieve(it["question"])) for it in items)
+print(f"Hit rate @k: {hits}/{len(items)} = {hits / len(items):.0%}")
